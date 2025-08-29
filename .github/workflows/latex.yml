@@ -1,0 +1,50 @@
+name: Build LaTeX document
+
+# Trigger the action on push to main branch
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  build_latex:
+    runs-on: ubuntu-latest
+    
+    steps:
+    # Checkout the repository
+    - name: Checkout repository
+      uses: actions/checkout@v4
+    
+    # Compile LaTeX document
+    - name: Compile LaTeX document
+      uses: xu-cheng/latex-action@v3
+      with:
+        # Replace 'main.tex' with your main LaTeX file name
+        root_file: main.tex
+        # Use latexmk for better dependency handling
+        latexmk_use_xelatex: false  # Set to true if you use XeLaTeX
+        latexmk_use_lualatex: false # Set to true if you use LuaLaTeX
+        # Additional latexmk arguments (optional)
+        args: "-pdf -file-line-error -halt-on-error -interaction=nonstopmode"
+    
+    # Upload PDF as artifact
+    - name: Upload PDF artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: compiled-pdf
+        path: gsoc_report.pdf  # Replace with your output PDF name
+        retention-days: 30
+    
+    # Create release with PDF (alternative to committing)
+    - name: Create Release with PDF
+      if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+      uses: softprops/action-gh-release@v1
+      with:
+        tag_name: "latest-build-${{ github.run_number }}"
+        name: "Auto-build ${{ github.run_number }}"
+        files: gsoc_report.pdf  # Replace with your PDF name
+        generate_release_notes: false
+        prerelease: true
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
