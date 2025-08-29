@@ -77,8 +77,9 @@
 \usepackage{xcolor}
 
 % Define a warm background color (light beige/cream)
-\definecolor{bg}{RGB}{255, 250, 240} % FloralWhite, warm and easy on the eyes
-
+% \definecolor{bg}{RGB}{255, 250, 240} % FloralWhite, warm and easy on the eyes
+\definecolor{bg}{RGB}{127,127,214} % FloralWhite, warm and easy on the eyes
+\colorlet{bg}{bg!15!white} % 15% original color, 85% white
 \setminted{
     fontsize=\normalsize,
     linenos,
@@ -121,7 +122,7 @@
 \newcommand{\tb}[1]{\textcolor{blue}{#1}}
 \newcommand{\tr}[1]{\textcolor{red}{#1}}
 
-\title{GSoC-SU2 Final Report}
+\title{Performance Optimization and Profiling of MLPCpp in SU2 \\ GSoC 2025 Final Report}
 \author{Divyaprakash}
 %\date{}
 
@@ -131,16 +132,95 @@
 
 
 \section{Introduction}
+\label{sec:intro}
 
+SU2~\cite{economon2016su2} is an open-source suite for computational fluid dynamics (CFD) widely used in both research and 
+industrial design. Within SU2, the \texttt{MLPCpp} module provides a compact C++ library for enabling 
+multilayer perceptron (MLP) inference as part of solver workflows. This capability supports a range of 
+data-driven tasks, including surrogate modeling of fluid properties and inverse regression problems.
 
+The original implementation of \texttt{MLPCpp} contained some performance 
+bottlenecks and limitations in usability for advanced data-driven workflows. As part of this Google Summer of Code (GSoC) project, a series of profiling, optimization, and refactoring efforts were undertaken to improve runtime efficiency 
+and extend the functionality of the library. Key directions included the introduction of more efficient data 
+structures, the refactoring of computational kernels for improved memory locality and numerical precision, 
+and enhancements to variable mapping mechanisms to support more complex workflows. 
 
+Profiling was initially conducted with \texttt{gprof}, followed by more detailed analysis with 
+\texttt{valgrind} and \texttt{kcachegrind}, and later \texttt{Tracy}, to identify hotspots in the neural 
+network inference pipeline. Guided by these insights, multiple optimizations were implemented, ranging 
+from memory layout improvements in the weight matrices to function-level optimizations using fused 
+multiply-add instructions. In addition, a low-overhead profiling capability was integrated into the SU2 
+build system along with documentation to enable future contributors to easily instrument and profile 
+the code. 
 
 % \section{Performance Improvement}
 
 \section{Code Profiling and Identifying Bottlenecks}
-Using code profiling, we figure out the bottlenecks to be the compute functions. They can be improved by a better way to store the weights. \tr{Mention here that Tracy was implemented and successfully merged.}
+\label{sec:profile}
+Code profiling was initially carried out using the \texttt{gprof} profiler 
+that is included with the \texttt{SU2} installation, in order to identify 
+the functions contributing most to the overall runtime. However, to obtain 
+a clearer picture of the child processes and to determine which operations 
+were consuming time within those functions, \texttt{valgrind} and 
+\texttt{kcachegrind} were subsequently employed. The latter provided 
+an interactive visualization of the profiling data, including call graphs 
+and annotated source code views, as shown in Figure~\ref{fig:callgraph}. 
+A detailed description of this process was also documented in a 
+blog post.\footnote{\url{https://dpcfd.com/posts/2025/06/gsoc-week-2/}}
+
+\begin{figure}[htbp]
+    \centering
+    \includegraphics[width=0.8\textwidth]{call_graph.png}
+    \caption{Call graph generated using \texttt{valgrind} and \texttt{kcachegrind}. 
+    The functions \texttt{ComputePsi}, \texttt{ComputeChi}, and \texttt{ComputeX} 
+    were identified as major contributors to the runtime.}
+    \label{fig:callgraph}
+\end{figure}
+
+From the profiling results, it was observed that the function 
+\texttt{Predict} itself did not consume a significant amount of self time. 
+Instead, the majority of the runtime was spent in the functions 
+\texttt{ComputePsi}, \texttt{ComputeChi}, and \texttt{ComputeX}. 
+These functions were therefore identified as the main targets for optimization.
+
+\subsection{Suggested Improvements}
+
+The performance analysis indicated that the loop within 
+\texttt{ComputeX} could be made more efficient. A representative code snippet 
+is shown below:
+
+\begin{minted}[fontsize=\small, linenos]{cpp}
+mlpdouble ComputeX(std::size_t iLayer, std::size_t iNeuron) const {
+  mlpdouble x;
+  x = total_layers[iLayer]->GetBias(iNeuron);
+  std::size_t nNeurons_previous = total_layers[iLayer - 1]->GetNNeurons();
+  for (std::size_t jNeuron = 0; jNeuron < nNeurons_previous; jNeuron++) {
+    x += weights_mat[iLayer - 1][iNeuron][jNeuron] *
+         total_layers[iLayer - 1]->GetOutput(jNeuron);
+  }
+  return x;
+}
+\end{minted}
+
+The nested access pattern, arising from the use of a \emph{vector of vectors of vectors}, was found to result in fragmented memory allocation:
+\begin{minted}{cpp}
+std::vector<std::vector<std::vector<mlpdouble>>> weights_mat;
+\end{minted}
+To improve performance, this structure was modified, with the changes and their effects described in the following sections.
+
+\subsection{Advanced Profiling with Tracy}
+
+In addition to \texttt{valgrind}, another profiling option was later 
+explored, namely \texttt{Tracy}, which offers very low overhead and provides 
+fine-grained insights into performance. This profiler was integrated with the 
+\texttt{meson} build system of \texttt{SU2}, and changes were made to the 
+\texttt{SU2} codebase to facilitate easy instrumentation. Both the integration 
+and the accompanying documentation were contributed as two separate Pull Requests 
+as part of this GSoC project.\footnote{\url{https://github.com/su2code/SU2/pull/2536}}%
+\footnote{\url{https://github.com/su2code/su2code.github.io/pull/180}}
 
 \section{Optimizing Weights Matrix Storage}
+\label{sec:weights}
 From the above discussions, it has been well established that one way to optimize the code is by improving how the weight matrices are stored. Currently, they are implemented as 3D nested vectors. To enhance performance, we consider two alternative approaches: replacing the 3D nested vectors with raw 3D pointers, or using flattened vectors. The implementation and results of both approaches are presented in the following subsections. Before that, however, we first review the current implementation of the weight matrix.
 
 \subsection{Weights Matrix}
@@ -186,6 +266,7 @@ From the above discussions, it is concluded that any modification to the weight 
 \end{figure}
 
 \subsection{3D Pointer}
+\label{subsec:3D}
 The neural network implementation previously employed a three-dimensional vector to represent the weight matrix.
 \[
 \texttt{std::vector<std::vector<std::vector<mlpdouble>>> weights\_mat}
@@ -282,6 +363,7 @@ The conversion from \texttt{std::vector} to a triple-pointer preserves the compu
 \\
 \noindent\textbf{Implementation Note:} The complete source code for this refactoring approach is available in the \texttt{$\text{gsoc\_dp}$} branch of the project repository\footnote{\url{https://github.com/divyaprakash-iitd/MLPCpp/tree/gsoc_dp}}.
 \subsection{Flattened Vector}
+\label{subsec:flat}
 \begin{tcolorbox}[colback=bg,colframe=red!60!black,title=Disclaimer]
 Some of the changes described in this section are still under debugging and may not yet work as intended.
 \end{tcolorbox}
@@ -397,7 +479,7 @@ for (auto i_layer = 0u; i_layer < ANN.GetNWeightLayers(); i_layer++) {
 
 For every function that uses \texttt{weights\_mat}, a duplicate version with a \texttt{\_flat} suffix is created that uses the new \texttt{GetFlatWeight} accessor.
 
-\begin{minted}[linenos,breaklines,frame=lines]{cpp}
+\begin{minted}{cpp}
 // In CNeuralNetwork.hpp, add these new functions.
 
 /**
@@ -433,12 +515,15 @@ Once verification with the flattened implementations is successful, the old impl
 \noindent\textbf{Implementation Note:} The complete source code for this refactoring approach is available in the \texttt{flatten} branch of the project repository\footnote{\url{https://github.com/divyaprakash-iitd/MLPCpp/tree/flatten}}.
 
 \section{Optimizing Variable Matching}
-\tr{The following sections detail the changes made to the \texttt{CLookUp\_ANN.hpp} file, comparing the latest version with an older version (\texttt{older\_CLookUp\_ANN.hpp}). The primary goal of these changes was to improve the performance and efficiency of the variable lookup mechanism.}
+\label{sec:varmatch}
+Efficient mapping of input and output variables is essential for integrating neural networks within \texttt{MLPCpp}. A hash map–based method, along with a cleaner replacement for the \texttt{FindVariableIndices} function, was proposed to improve clarity and maintainability.
+
 
 \subsection{Hash Maps}
+\label{subsec:hash}
 The changes were made to the \texttt{FindVariableIndices} function. This function is responsible for mapping variable names to their corresponding indices within the Artificial Neural Network (ANN).
 
-The original implementation used a nested loop structure to find matching variable names. The outer loop iterated through the variables of the ANN, and the inner loop iterated through the list of variable names to be found. This approach has a time complexity of O(N*M), where N is the number of variables in the ANN and M is the number of variables to be mapped. For large models, this can lead to significant performance bottlenecks.
+The original implementation used a nested loop structure to find matching variable names. The outer loop iterated through the variables of the ANN, and the inner loop iterated through the list of variable names to be found. This approach has a time complexity of $O(N \times M)$, where N is the number of variables in the ANN and M is the number of variables to be mapped. For large models, this can lead to significant performance bottlenecks.
 
 \subsubsection{Implementation}
 The new implementation in \texttt{CLookUp\_ANN.hpp} replaces the nested loops with a more efficient approach utilizing a \texttt{std::unordered\_map} (hash map). The steps are as follows:
@@ -449,7 +534,7 @@ The new implementation in \texttt{CLookUp\_ANN.hpp} replaces the nested loops wi
     \item For each ANN variable, it performs a quick lookup in the hash map to see if there is a match.
 \end{enumerate}
 
-This change reduces the time complexity to O(N+M), which is a substantial improvement over the previous O(N*M).
+This change reduces the time complexity to $O(N+M)$, which is a substantial improvement over the previous $O(N \times M)$.
 
 \begin{minted}{cpp}
   std::vector<std::pair<size_t, size_t>> FindVariableIndices(
@@ -490,6 +575,7 @@ The new implementation offers several advantages:
 \noindent\textbf{Implementation Note:} The complete source code for this refactoring approach is available in the \texttt{$\text{gsoc\_dp}$} branch of the project repository\footnote{\url{https://github.com/divyaprakash-iitd/MLPCpp/tree/gsoc_dp}}.
 
 \subsection{Replacing \texttt{FindVariableIndices} Function}
+\label{subsec:varmap2}
 \begin{tcolorbox}[colback=bg,colframe=red!60!black,title=Disclaimer]
 Some of the changes described in this section are still under debugging and may not yet work as intended.
 \end{tcolorbox}
@@ -594,7 +680,7 @@ Implementing these changes is expected to yield the following advantages:
 \noindent\textbf{Implementation Note:} The complete source code for this refactoring approach is available in the \texttt{revarmap} branch of the project repository\footnote{\url{https://github.com/divyaprakash-iitd/MLPCpp/tree/revarmap}}.
 
 \section{Neural Network Function Optimization}
-
+\label{sec:nnfunc}
 Several critical computational functions in the neural network implementation were optimized to improve both performance and numerical precision. The optimizations focused on reducing redundant array access operations and leveraging fused multiply-add (FMA) instructions for better floating-point accuracy.
 
 \subsection{Implementation}
@@ -693,14 +779,85 @@ The optimized access patterns improve cache locality by reducing the number of p
 \noindent\textbf{Implementation Note:} The complete source code for this refactoring approach is available in the \texttt{$\text{gsoc\_dp}$} branch of the project repository\footnote{\url{https://github.com/divyaprakash-iitd/MLPCpp/tree/gsoc_dp}}.
 
 \section{Results}
+\label{sec:results}
+
+The optimizations described in Section~\ref{sec:nnfunc} and 
+Subsections~\ref{subsec:3D} and~\ref{subsec:hash} were combined in the code. 
+The resulting implementation was submitted as a Pull Request\footnote{\url{https://github.com/EvertBunschoten/MLPCpp/pull/2}} 
+to the \texttt{MLPCpp} subproject of \texttt{SU2}. 
+
+To verify the correctness of the implementation, the code was compiled and the 
+test case provided in the \texttt{MLPCpp} repository was executed. In this test, 
+the derivatives obtained using finite differences were found to agree with those 
+calculated analytically by the network, thereby confirming the validity of the implementation.
+
+The prediction times of the original implementation were compared with those of 
+the optimized GSoC version over multiple runs. The original implementation was 
+observed to have an average runtime of \textbf{251.98~$\pm$~7.16~ms}, whereas the 
+optimized version reduced this to \textbf{178.96~$\pm$~4.56~ms}. This corresponds 
+to a \textbf{1.41$\times$ speedup}, or equivalently a \textbf{28.9\% reduction in 
+execution time}. Figure~X presents the average runtimes with standard deviation 
+error bars, which reflect the run-to-run fluctuations in the measurements. It may 
+therefore be concluded that the optimized implementation not only achieves faster 
+predictions but also exhibits greater consistency across runs.
+
+
+\begin{figure}[ht]
+    \centering
+    \includegraphics[width=0.35\textwidth]{timings_plot.pdf}
+    \caption{Average prediction time of the original and refactored implementations. 
+    Error bars represent the standard deviation across multiple runs. 
+    The refactored implementation was observed to achieve a mean runtime of 
+    178.96~$\pm$~4.56~ms compared to 251.98~$\pm$~7.16~ms for the original, 
+    corresponding to a 1.41$\times$ speedup (approximately 29\% reduction in execution time).}
+    \label{fig:timings}
+\end{figure}
 
 \section{Conclusion}
+\label{sec:conclusion}
+
+This project has contributed to the performance improvement and usability of the \texttt{MLPCpp} module in SU2. 
+Through systematic profiling and targeted optimizations, key runtime bottlenecks were identified and 
+addressed. The refactoring of the weight matrix storage, introduction of hash-based variable lookup, and 
+improvements to the neural network compute functions resulted in a measurable reduction in execution 
+time. Specifically, the optimized implementation achieved a mean prediction runtime of 
+178.96~$\pm$~4.56~ms compared to 251.98~$\pm$~7.16~ms for the original version, corresponding to a 
+1.41$\times$ speedup (approximately 29\% reduction in execution time). 
+
+Beyond performance improvements, this work also contributed to the long-term maintainability of SU2. 
+The integration of the Tracy profiler into the Meson build system, along with the accompanying 
+documentation, ensures that future development within SU2 can benefit from low-overhead runtime 
+analysis and continuous performance monitoring. 
 
 \section{Future Work}
+\label{sec:future}
+
+Although several important optimizations were completed during this project, some work remains in progress 
+and would benefit from further development. In particular, the migration of the weight matrix storage from 
+a nested vector structure to a flattened vector representation is still under debugging. Completing this 
+transition would allow the full benefits of contiguous memory storage to be realized in terms of performance 
+and cache efficiency. 
+
+Similarly, the proposed replacement of the \texttt{FindVariableIndices} function with a more direct and 
+maintainable variable mapping approach requires additional testing and integration. Finalizing this change 
+would improve both the clarity and the efficiency of variable lookups within \texttt{MLPCpp}. 
+
+It is hoped that these ongoing efforts can be carried forward, building on the foundation established in this 
+work and contributing to the long-term performance and maintainability of SU2.
 
 \section{Acknowledgment}
+\label{sec:ack}
+I would like to sincerely thank Google and the SU2 community for providing me 
+with the opportunity to contribute to this project through GSoC 2025. I am 
+especially grateful to my mentors, Evert Bunschoten and Joshua A. Kelly, for their constant guidance, 
+encouragement, and support throughout the project. Their approachable and 
+friendly mentorship created an excellent learning environment, and their insights 
+were invaluable in shaping the progress and outcomes of this work. I am also 
+thankful to the wider SU2 developer community for their feedback, code reviews, 
+and discussions, which greatly enriched the overall experience.
 
-\clearpage
+
+% \clearpage
 \printbibliography
 
 \end{document}
