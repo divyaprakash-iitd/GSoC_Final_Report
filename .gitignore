@@ -1,6 +1,3 @@
-# Compiled PDFs
-*.pdf
-
 # LaTeX auxiliary files
 *.aux
 *.bbl
@@ -11,3 +8,7 @@
 *.out
 *.synctex.gz
 *.toc
+
+# Ignore all PDFs except the main one
+*.pdf
+!main.pdf  # Keep main.pdf in the repo
