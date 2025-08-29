@@ -33,7 +33,7 @@ jobs:
       uses: actions/upload-artifact@v4
       with:
         name: compiled-pdf
-        path: gsoc_report.pdf  # Replace with your output PDF name
+        path: main.pdf  # Replace with your output PDF name
         retention-days: 30
     
     # Create release with PDF (alternative to committing)
@@ -43,7 +43,7 @@ jobs:
       with:
         tag_name: "latest-build-${{ github.run_number }}"
         name: "Auto-build ${{ github.run_number }}"
-        files: gsoc_report.pdf  # Replace with your PDF name
+        files: main.pdf  # Replace with your PDF name
         generate_release_notes: false
         prerelease: true
       env:
