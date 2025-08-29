@@ -767,7 +767,7 @@ mlpdouble ComputedOutputdInput(std::size_t iLayer, std::size_t iNeuron,
 
 % \subsection{Discussion}
 
-The use of \texttt{std::fma()} provides improved floating-point precision by performing the multiply-add operation as a single step, reducing intermediate rounding errors that would occur in separate multiplication and addition operations.
+The use of \texttt{std::fma()} provides improved floating-point precision by performing the multiply-add operation as a single step, reducing intermediate rounding errors that would occur in separate multiplication and addition operations. 
 
 \paragraph{Memory Access Optimization:}
 Pre-extracting weight vectors and neuron counts reduces the computational overhead of repeated array indexing and function calls within tight loops, particularly beneficial for networks with large layer sizes.
