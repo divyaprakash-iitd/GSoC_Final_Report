@@ -42,10 +42,9 @@ jobs:
       run: |
         git config --local user.email "action@github.com"
         git config --local user.name "GitHub Action"
-        git add main.pdf  # Replace with your PDF name
+        git add -f main.pdf  # Force add PDF (override .gitignore)
         git add .github/  # Also add the workflow files
         git diff --staged --quiet || git commit -m "Auto-update compiled PDF [skip ci]"
         git push
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-

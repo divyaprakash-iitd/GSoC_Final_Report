@@ -9,6 +9,5 @@
 *.synctex.gz
 *.toc
 
-# Ignore all PDFs except the main one
+# Ignore all PDFs
 *.pdf
-!main.pdf  # Keep main.pdf in the repo
